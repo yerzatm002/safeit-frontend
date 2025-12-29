@@ -21,10 +21,10 @@ import ErrorBlock from "../../components/ErrorBlock";
 import { fetchUsers } from "../../api/users.api";
 import { fetchAdminInstructions } from "../../api/admin.instructions.api";
 import { fetchTests } from "../../api/admin.tests.api";
+import { fetchAckLogs } from "../../api/admin.logs.api"; // ✅ важно (acks logs admin)
 
 import {
-  fetchInstructionsReport,
-  fetchTestsReport,
+  fetchTestsReport, // ⚠️ это у вас фактически logs по тестам
   exportReportsPdf,
 } from "../../api/admin.reports.api";
 
@@ -48,6 +48,96 @@ function downloadBlob(blob, filename = "report.pdf") {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * ✅ Агрегация ACK logs по instruction_id
+ * returns:
+ * {
+ *   instruction_id: { count, lastAckAt }
+ * }
+ */
+function aggregateAcksByInstruction(ackLogs = []) {
+  const map = {};
+
+  for (const log of ackLogs) {
+    const instructionId = log?.instruction?.id;
+    const ackedAt = log?.acknowledged_at;
+
+    if (!instructionId) continue;
+
+    if (!map[instructionId]) {
+      map[instructionId] = { count: 0, lastAckAt: null };
+    }
+
+    map[instructionId].count += 1;
+
+    if (!map[instructionId].lastAckAt) {
+      map[instructionId].lastAckAt = ackedAt;
+    } else {
+      const cur = new Date(map[instructionId].lastAckAt).getTime();
+      const next = new Date(ackedAt).getTime();
+      if (next > cur) map[instructionId].lastAckAt = ackedAt;
+    }
+  }
+
+  return map;
+}
+
+/**
+ * ✅ Агрегация тестовых логов по test.id
+ * returns array rows:
+ * {
+ *   test_id,
+ *   test_title,
+ *   instruction_title,
+ *   attempts,
+ *   passed_count,
+ *   avg_score,
+ *   last_attempt_at
+ * }
+ */
+function aggregateTestsReport(testLogs = []) {
+  const map = {};
+
+  for (const log of testLogs) {
+    const testId = log?.test?.id;
+    const testTitle = log?.test?.title;
+    const instructionTitle = log?.test?.instruction?.title;
+
+    if (!testId) continue;
+
+    if (!map[testId]) {
+      map[testId] = {
+        test_id: testId,
+        test_title: testTitle || "-",
+        instruction_title: instructionTitle || "-",
+        attempts: 0,
+        passed_count: 0,
+        total_score: 0,
+        last_attempt_at: null,
+      };
+    }
+
+    map[testId].attempts += 1;
+    map[testId].total_score += Number(log.score || 0);
+
+    if (log.passed) map[testId].passed_count += 1;
+
+    const attemptTime = log.created_at;
+    if (!map[testId].last_attempt_at) {
+      map[testId].last_attempt_at = attemptTime;
+    } else {
+      const cur = new Date(map[testId].last_attempt_at).getTime();
+      const next = new Date(attemptTime).getTime();
+      if (next > cur) map[testId].last_attempt_at = attemptTime;
+    }
+  }
+
+  return Object.values(map).map((r) => ({
+    ...r,
+    avg_score: r.attempts > 0 ? r.total_score / r.attempts : 0,
+  }));
 }
 
 export default function ReportsPage() {
@@ -84,13 +174,8 @@ export default function ReportsPage() {
     if (f.date_from) p.date_from = f.date_from;
     if (f.date_to) p.date_to = f.date_to;
     if (f.user_id) p.user_id = f.user_id;
-
-    // для инструкций
     if (f.instruction_id) p.instruction_id = f.instruction_id;
-
-    // для тестов
     if (f.test_id) p.test_id = f.test_id;
-
     return p;
   };
 
@@ -106,7 +191,7 @@ export default function ReportsPage() {
       setInstructions(instr || []);
       setTests(t || []);
     } catch {
-      // списки необязательны, отчёты могут работать и без них
+      // списки необязательны
     }
   };
 
@@ -117,13 +202,30 @@ export default function ReportsPage() {
 
       const params = buildParams(filters);
 
-      const [instrReport, testsReport] = await Promise.all([
-        fetchInstructionsReport(params),
-        fetchTestsReport(params),
+      // ✅ 1) Инструкции + ACK logs
+      const [instructionsList, ackLogs] = await Promise.all([
+        fetchAdminInstructions(),   // список инструкций
+        fetchAckLogs(params),       // логи ознакомлений (можно фильтровать по date/user/instruction)
       ]);
 
-      setInstructionRows(instrReport || []);
-      setTestsRows(testsReport || []);
+      const ackAgg = aggregateAcksByInstruction(ackLogs || []);
+
+      const instructionReport = (instructionsList || []).map((instr) => ({
+        id: instr.id,
+        title: instr.title,
+        type: instr.type,
+        created_at: instr.created_at,
+        acks_count: ackAgg[instr.id]?.count || 0,
+        last_ack_at: ackAgg[instr.id]?.lastAckAt || null,
+      }));
+
+      // ✅ 2) Тесты (backend отдаёт попытки → агрегируем)
+      const testLogs = await fetchTestsReport(params);
+      const testsReport = aggregateTestsReport(testLogs || []);
+
+      setInstructionRows(instructionReport);
+      setTestsRows(testsReport);
+
     // eslint-disable-next-line no-unused-vars
     } catch (e) {
       setError("Не удалось загрузить отчёты");
@@ -170,25 +272,39 @@ export default function ReportsPage() {
   const instructionColumns = useMemo(
     () => [
       {
-        field: "instruction_title",
+        field: "title",
         headerName: "Инструкция",
         flex: 1,
-        minWidth: 280,
-        valueGetter: (value, row) =>
-          row?.instruction?.title || row?.instruction_title || row?.title || "-",
+        minWidth: 320,
+        valueGetter: (value, row) => row?.title || "-",
       },
       {
-        field: "views_count",
+        field: "type",
+        headerName: "Тип",
+        width: 120,
+        valueGetter: (value, row) => row?.type || "-",
+      },
+      {
+        field: "acks_count",
         headerName: "Ознакомлений",
-        width: 150,
-        valueGetter: (value, row) =>
-          row?.views_count ?? row?.acks_count ?? row?.count ?? "-",
+        width: 140,
+        valueGetter: (value, row) => row?.acks_count ?? 0,
       },
       {
         field: "last_ack_at",
         headerName: "Последнее ознакомление",
         width: 220,
-        valueGetter: (value, row) => formatDate(row?.last_ack_at),
+        valueGetter: (value, row) => row?.last_ack_at,
+        valueFormatter: (params) => formatDate(params),
+        sortComparator: (v1, v2) =>
+          new Date(v1 || 0).getTime() - new Date(v2 || 0).getTime(),
+      },
+      {
+        field: "created_at",
+        headerName: "Создана",
+        width: 200,
+        valueGetter: (value, row) => row?.created_at,
+        valueFormatter: (params) => formatDate(params),
       },
     ],
     []
@@ -201,34 +317,32 @@ export default function ReportsPage() {
         field: "test_title",
         headerName: "Тест",
         flex: 1,
-        minWidth: 260,
-        valueGetter: (value, row) =>
-          row?.test?.title || row?.test_title || row?.title || "-",
+        minWidth: 240,
+        valueGetter: (value, row) => row?.test_title || "-",
       },
       {
         field: "instruction_title",
         headerName: "Инструкция",
         flex: 1,
-        minWidth: 260,
-        valueGetter: (value, row) =>
-          row?.instruction?.title || row?.instruction_title || "-",
+        minWidth: 280,
+        valueGetter: (value, row) => row?.instruction_title || "-",
       },
       {
         field: "attempts",
         headerName: "Попыток",
-        width: 120,
-        valueGetter: (value, row) => row?.attempts ?? row?.count ?? "-",
+        width: 110,
+        valueGetter: (value, row) => row?.attempts ?? 0,
       },
       {
         field: "passed_count",
         headerName: "Пройдено",
-        width: 120,
-        valueGetter: (value, row) => row?.passed_count ?? "-",
+        width: 110,
+        valueGetter: (value, row) => row?.passed_count ?? 0,
       },
       {
         field: "avg_score",
         headerName: "Средний балл",
-        width: 160,
+        width: 150,
         valueGetter: (value, row) =>
           row?.avg_score !== undefined && row?.avg_score !== null
             ? Number(row.avg_score).toFixed(1)
@@ -238,7 +352,10 @@ export default function ReportsPage() {
         field: "last_attempt_at",
         headerName: "Последняя попытка",
         width: 210,
-        valueGetter: (value, row) => formatDate(row?.last_attempt_at),
+        valueGetter: (value, row) => row?.last_attempt_at,
+        valueFormatter: (params) => formatDate(params),
+        sortComparator: (v1, v2) =>
+          new Date(v1 || 0).getTime() - new Date(v2 || 0).getTime(),
       },
     ],
     []
@@ -331,7 +448,7 @@ export default function ReportsPage() {
               <MenuItem value="">— Все —</MenuItem>
               {tests.map((t) => (
                 <MenuItem key={t.id} value={t.id}>
-                  {t.title || t.name}
+                  {t.title}
                 </MenuItem>
               ))}
             </TextField>
@@ -350,7 +467,6 @@ export default function ReportsPage() {
             <Tab label={`Отчёт по тестам (${testsRows.length})`} />
           </Tabs>
 
-          {/* ✅ Instruction report */}
           {tab === 0 && (
             <>
               {instructionRows.length === 0 ? (
@@ -360,11 +476,14 @@ export default function ReportsPage() {
                   <DataGrid
                     rows={instructionRows}
                     columns={instructionColumns}
-                    getRowId={(row) => row.id || row.instruction_id || Math.random()}
+                    getRowId={(row) => row.id}
                     disableRowSelectionOnClick
                     pageSizeOptions={[5, 10, 20]}
                     initialState={{
                       pagination: { paginationModel: { pageSize: 10, page: 0 } },
+                      sorting: {
+                        sortModel: [{ field: "acks_count", sort: "desc" }],
+                      },
                     }}
                     localeText={{ noRowsLabel: "Нет данных" }}
                   />
@@ -373,7 +492,6 @@ export default function ReportsPage() {
             </>
           )}
 
-          {/* ✅ Tests report */}
           {tab === 1 && (
             <>
               {testsRows.length === 0 ? (
@@ -383,11 +501,14 @@ export default function ReportsPage() {
                   <DataGrid
                     rows={testsRows}
                     columns={testsColumns}
-                    getRowId={(row) => row.id || row.test_id || Math.random()}
+                    getRowId={(row) => row.test_id}
                     disableRowSelectionOnClick
                     pageSizeOptions={[5, 10, 20]}
                     initialState={{
                       pagination: { paginationModel: { pageSize: 10, page: 0 } },
+                      sorting: {
+                        sortModel: [{ field: "last_attempt_at", sort: "desc" }],
+                      },
                     }}
                     localeText={{ noRowsLabel: "Нет данных" }}
                   />

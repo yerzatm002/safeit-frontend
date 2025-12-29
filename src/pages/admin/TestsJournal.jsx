@@ -59,8 +59,7 @@ export default function TestsJournal() {
       setUsers(u || []);
       setInstructions(instr || []);
       setTests(t || []);
-    // eslint-disable-next-line no-unused-vars
-    } catch (e) {
+    } catch {
       // списки необязательные
     }
   };
@@ -93,6 +92,7 @@ export default function TestsJournal() {
   useEffect(() => {
     loadLists();
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleChange = (key, value) => {
@@ -119,15 +119,21 @@ export default function TestsJournal() {
         field: "user",
         headerName: "Пользователь",
         flex: 1,
-        minWidth: 240,
+        minWidth: 220,
         valueGetter: (value, row) =>
           row?.user?.full_name || row?.user?.email || row?.user_id || "-",
+      },
+      {
+        field: "group",
+        headerName: "Группа",
+        width: 160,
+        valueGetter: (value, row) => row?.user?.group_name || "-",
       },
       {
         field: "test",
         headerName: "Тест",
         flex: 1,
-        minWidth: 260,
+        minWidth: 220,
         valueGetter: (value, row) =>
           row?.test?.title || row?.test?.name || row?.test_id || "-",
       },
@@ -135,9 +141,9 @@ export default function TestsJournal() {
         field: "instruction",
         headerName: "Инструкция",
         flex: 1,
-        minWidth: 260,
+        minWidth: 320,
         valueGetter: (value, row) =>
-          row?.instruction?.title || row?.instruction_id || "-",
+          row?.test?.instruction?.title || "-", // ✅ ИСПРАВЛЕНО
       },
       {
         field: "score",
@@ -148,7 +154,8 @@ export default function TestsJournal() {
       {
         field: "passed",
         headerName: "Статус",
-        width: 140,
+        width: 150,
+        sortable: false,
         renderCell: (params) =>
           params.row?.passed ? (
             <Chip label="Пройден" color="success" variant="outlined" />
@@ -157,10 +164,13 @@ export default function TestsJournal() {
           ),
       },
       {
-        field: "submitted_at",
+        field: "created_at",
         headerName: "Дата",
-        width: 200,
-        valueGetter: (value, row) => formatDate(row?.submitted_at),
+        width: 210,
+        valueGetter: (value, row) => row?.created_at || null,
+        valueFormatter: (params) => formatDate(params.value),
+        sortComparator: (v1, v2) =>
+          new Date(v1 || 0).getTime() - new Date(v2 || 0).getTime(),
       },
     ],
     []
@@ -273,7 +283,7 @@ export default function TestsJournal() {
               initialState={{
                 pagination: { paginationModel: { pageSize: 10, page: 0 } },
                 sorting: {
-                  sortModel: [{ field: "submitted_at", sort: "desc" }],
+                  sortModel: [{ field: "created_at", sort: "desc" }], // ✅ ИСПРАВЛЕНО
                 },
               }}
               localeText={{ noRowsLabel: "Записей не найдено" }}

@@ -131,7 +131,7 @@ export default function AcksJournal() {
         field: "acked_at",
         headerName: "Дата ознакомления",
         width: 200,
-        valueGetter: (value, row) => formatDate(row?.acked_at),
+        valueGetter: (value, row) => formatDate(row?.acknowledged_at),
       },
     ],
     []
